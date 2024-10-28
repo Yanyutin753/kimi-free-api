@@ -40,7 +40,7 @@ jobs:
         file: ./Dockerfile
         push: true
         tags: |
-          vinlic/kimi-free-api:${{ steps.tag_name.outputs.tag }}
-          vinlic/kimi-free-api:latest
+          yangclivia/kimi-free-api:${{ steps.tag_name.outputs.tag }}
+          yangclivia/kimi-free-api:latest
         platforms: linux/amd64,linux/arm64
         build-args: TARGETPLATFORM=${{ matrix.platform }}

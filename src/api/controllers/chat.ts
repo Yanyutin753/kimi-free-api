@@ -757,9 +757,9 @@ async function receiveStream(model: string, convId: string, stream: any) {
           resolve(data);
         }
         // 处理联网搜索
-        else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res'){
+        else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
           webSearchCount += 1;
-          refContent += `【检索 ${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
+          refContent += `检索 【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
         }
         // else
         //   logger.warn(result.event, result);
@@ -859,7 +859,7 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
           choices: [
             {
               index: 0, delta: {
-                content: `【检索 ${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`
+                content: `检索 【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`
               }, finish_reason: null
             }
           ],
