@@ -724,6 +724,9 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
  */
 async function receiveStream(model: string, convId: string, stream: any) {
   let webSearchCount = 0;
+  let text_buffer = '';
+  let is_buffer_search = false;
+  let is_search_url = '';
   return new Promise((resolve, reject) => {
     // 消息初始化
     const data = {
@@ -748,6 +751,22 @@ async function receiveStream(model: string, convId: string, stream: any) {
         // 处理消息
         if (result.event == 'cmpl' && result.text) {
           const exceptCharIndex = result.text.indexOf("�");
+          if (result.text === '[' && !is_buffer_search) {
+            text_buffer += result.text;
+            is_buffer_search = true;
+          } else if (result.text === ']' && is_buffer_search) {
+            text_buffer += result.text;
+            is_buffer_search = false;
+            text_buffer = '';
+            result.text = result.text.replace(/\[[^\]]+\]/g, match => {
+              // 检查是否符合 `[^1^]` 格式
+              if (/^\[\^\d+\^\]$/.test(match)) {
+                return `[${match.slice(2, -2)}](${is_search_url})`;
+              } else {
+                return match;
+              }
+            });
+          }
           data.choices[0].message.content += result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
         }
         // 处理结束或错误
@@ -760,6 +779,9 @@ async function receiveStream(model: string, convId: string, stream: any) {
         else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
           webSearchCount += 1;
           refContent += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
+        }
+        else if (result.event == 'ref_docs' && result.ref_cards) {
+          is_search_url = result.ref_cards.map(card => card.url)[0];
         }
         // else
         //   logger.warn(result.event, result);
