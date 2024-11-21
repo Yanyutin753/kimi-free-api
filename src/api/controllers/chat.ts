@@ -763,7 +763,7 @@ async function receiveStream(model: string, convId: string, stream: any) {
               logger.info(text_buffer);
               result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
                 if (/^\[\^\d+\^\]$/.test(match)) {
-                  return `[[${match.slice(2, -2)}]](${is_search_url})`;
+                  return ` [[${match.slice(2, -2)}]](${is_search_url})`;
                 } else {
                   return match;
                 }
@@ -856,7 +856,7 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
             logger.info(text_buffer);
             result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
               if (/^\[\^\d+\^\]$/.test(match)) {
-                return `[[${match.slice(2, -2)}]](${is_search_url})`;
+                return ` [[${match.slice(2, -2)}]](${is_search_url})`;
               } else {
                 return match;
               }
