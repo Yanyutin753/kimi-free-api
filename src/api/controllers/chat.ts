@@ -290,6 +290,8 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
 
     const streamStartTime = util.timestamp();
     // 接收流为输出文本
+
+    logger.info('Stream has started transfer');
     const answer = await receiveStream(model, convId, result.data);
     logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
 
@@ -753,22 +755,23 @@ async function receiveStream(model: string, convId: string, stream: any) {
           const exceptCharIndex = result.text.indexOf("�");
           if (result.text === '[' && !is_buffer_search) {
             text_buffer += result.text;
-            logger.info(text_buffer);
             is_buffer_search = true;
             return;
-          } else if (result.text === ']' && is_buffer_search) {
+          } else if (is_buffer_search) {
             text_buffer += result.text;
-            is_buffer_search = false;
-            text_buffer = '';
-            logger.info(text_buffer);
-            result.text = result.text.replace(/\[[^\]]+\]/g, match => {
-              // 检查是否符合 `[^1^]` 格式
-              if (/^\[\^\d+\^\]$/.test(match)) {
-                return `[${match.slice(2, -2)}](${is_search_url})`;
-              } else {
-                return match;
-              }
-            });
+            if (result.text.indexOf("]") != -1) {
+              logger.info(text_buffer);
+              result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
+                if (/^\[\^\d+\^\]$/.test(match)) {
+                  return `[[${match.slice(2, -2)}]](${is_search_url})`;
+                } else {
+                  return match;
+                }
+              });
+              is_buffer_search = false;
+              text_buffer = '';
+            }
+            else return;
           }
           data.choices[0].message.content += result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
         }
@@ -830,6 +833,9 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
     ],
     created
   })}\n\n`);
+  let text_buffer = '';
+  let is_buffer_search = false;
+  let is_search_url = '';
   const parser = createParser(event => {
     try {
       if (event.type !== "event") return;
@@ -840,6 +846,26 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
       // 处理消息
       if (result.event == 'cmpl') {
         const exceptCharIndex = result.text.indexOf("�");
+        if (result.text === '[' && !is_buffer_search) {
+          text_buffer += result.text;
+          is_buffer_search = true;
+          return;
+        } else if (is_buffer_search) {
+          text_buffer += result.text;
+          if (result.text.indexOf("]") != -1) {
+            logger.info(text_buffer);
+            result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
+              if (/^\[\^\d+\^\]$/.test(match)) {
+                return `[[${match.slice(2, -2)}]](${is_search_url})`;
+              } else {
+                return match;
+              }
+            });
+            is_buffer_search = false;
+            text_buffer = '';
+          }
+          else return;
+        }
         const chunk = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
         const data = `data: ${JSON.stringify({
           id: convId,
@@ -893,6 +919,11 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
           created
         })}\n\n`;
         !transStream.closed && transStream.write(data);
+      }
+      else if (result.event == 'ref_docs' && result.ref_cards) {
+        is_search_url = result.ref_cards.map(card => card.url)[0];
+        logger.info(is_search_url);
+        return;
       }
       // else
       //   logger.warn(result.event, result);
