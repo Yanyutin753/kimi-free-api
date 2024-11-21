@@ -754,6 +754,7 @@ async function receiveStream(model: string, convId: string, stream: any) {
           if (result.text === '[' && !is_buffer_search) {
             text_buffer += result.text;
             is_buffer_search = true;
+            return;
           } else if (result.text === ']' && is_buffer_search) {
             text_buffer += result.text;
             is_buffer_search = false;
@@ -782,6 +783,7 @@ async function receiveStream(model: string, convId: string, stream: any) {
         }
         else if (result.event == 'ref_docs' && result.ref_cards) {
           is_search_url = result.ref_cards.map(card => card.url)[0];
+          return;
         }
         // else
         //   logger.warn(result.event, result);
