@@ -753,12 +753,14 @@ async function receiveStream(model: string, convId: string, stream: any) {
           const exceptCharIndex = result.text.indexOf("�");
           if (result.text === '[' && !is_buffer_search) {
             text_buffer += result.text;
+            logger.info(text_buffer);
             is_buffer_search = true;
             return;
           } else if (result.text === ']' && is_buffer_search) {
             text_buffer += result.text;
             is_buffer_search = false;
             text_buffer = '';
+            logger.info(text_buffer);
             result.text = result.text.replace(/\[[^\]]+\]/g, match => {
               // 检查是否符合 `[^1^]` 格式
               if (/^\[\^\d+\^\]$/.test(match)) {
@@ -783,6 +785,7 @@ async function receiveStream(model: string, convId: string, stream: any) {
         }
         else if (result.event == 'ref_docs' && result.ref_cards) {
           is_search_url = result.ref_cards.map(card => card.url)[0];
+          logger.info(is_search_url);
           return;
         }
         // else
