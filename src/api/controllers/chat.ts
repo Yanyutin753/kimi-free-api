@@ -368,9 +368,14 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
     const streamStartTime = util.timestamp();
 
     // 接收流为输出文本
+    const answer = await receiveStream(model, convId, stream);
 
-    logger.info('Stream has started transfer');
-    const answer = await receiveStream(model, convId, result.data);
+    // 如果上次请求生成长度超限，则继续请求
+    if(answer.choices[0].finish_reason == 'length' && answer.segment_id) {
+      const continueAnswer = await createCompletion(model, [], refreshToken, convId, retryCount, answer.segment_id);
+      answer.choices[0].message.content += continueAnswer.choices[0].message.content;
+    }
+  
     logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
 
     // 异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
