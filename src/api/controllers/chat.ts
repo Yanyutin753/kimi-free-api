@@ -916,7 +916,7 @@ async function receiveStream(model: string, convId: string, refreshToken: string
           data.segment_id = result.id;
         }
         else if (result.event == 'resp') {
-          sid = result.id;
+          sid = result?.id;
         }
         // 处理超长文本
         else if (result.event == 'length') {
@@ -1069,7 +1069,7 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
         segmentId = result.id;
       }
       else if (result.event == 'resp') {
-        sid = result.id;
+        sid = result?.id;
       }
       // 处理超长文本
       else if (result.event == 'length') {
