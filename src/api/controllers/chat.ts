@@ -10,6 +10,7 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from 'eventsource-parser'
 import logger from '@/lib/logger.ts';
 import util from '@/lib/util.ts';
+import { ca } from "date-fns/locale";
 
 // 模型名称
 const MODEL_NAME = 'kimi';
@@ -858,20 +859,26 @@ async function processReferences(text_buffer, refs, convId, sid, refreshToken, r
       let is_search_url = findRefUrl(refId, newRefs, logger);
 
       if (!is_search_url) {
-        const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
-          data: {
-            "queries": [
-              {
-                "chat_id": convId,
-                "sid": sid,
-                "z_idx": 0
-              }
-            ]
-          }
-        });
-        const fetchedRefs = res?.items[0]?.refs || [];
-        newRefs = [...fetchedRefs];
-        is_search_url = findRefUrl(refId, newRefs, logger);
+        try {
+          const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
+            data: {
+              "queries": [
+                {
+                  "chat_id": convId,
+                  "sid": sid,
+                  "z_idx": 0
+                }
+              ]
+            }
+          });
+          const fetchedRefs = res?.items[0]?.refs || [];
+          newRefs = [...fetchedRefs];
+          is_search_url = findRefUrl(refId, newRefs, logger);
+        }
+        catch (err) {
+          logger.error(err);
+          is_search_url = '';
+        }
       }
 
       if (is_search_url) {
@@ -1045,7 +1052,6 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
       // 处理消息
 
       if (result.event == 'cmpl') {
-        const exceptCharIndex = result.text.indexOf("�");
         if (result.text === '[' && !is_buffer_search) {
           text_buffer += result.text;
           is_buffer_search = true;
@@ -1061,17 +1067,18 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
           }
           else return;
         }
-        const chunk = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
+
         const data = `data: ${JSON.stringify({
           id: convId,
           model,
           object: 'chat.completion.chunk',
           choices: [
-            { index: 0, delta: { content: (searchFlag ? '\n' : '') + chunk }, finish_reason: null }
+            { index: 0, delta: { content: (searchFlag ? '\n' : '') + result.text }, finish_reason: null }
           ],
           segment_id: segmentId,
           created
         })}\n\n`;
+        logger.info(result.text);
         if (searchFlag)
           searchFlag = false;
         !transStream.closed && transStream.write(data);
@@ -1128,11 +1135,6 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
           created
         })}\n\n`;
         !transStream.closed && transStream.write(data);
-      }
-      else if (result.event == 'ref_docs' && result.ref_cards) {
-        is_search_url = result.ref_cards.map(card => card.url)[0];
-        logger.info(is_search_url);
-        return;
       }
       // else
       //   logger.warn(result.event, result);
