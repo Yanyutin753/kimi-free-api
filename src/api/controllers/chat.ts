@@ -1000,6 +1000,7 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
   let text_buffer = '';
   let is_buffer_search = false;
   let is_search_url = '';
+  let sid = '';
   const parser = createParser(async (event) => {
     try {
       if (event.type !== "event") return;
@@ -1066,6 +1067,9 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
       // 处理请求ID
       else if (result.event == 'req') {
         segmentId = result.id;
+      }
+      else if (result.event == 'resp') {
+        sid = result.id;
       }
       // 处理超长文本
       else if (result.event == 'length') {
