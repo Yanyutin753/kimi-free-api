@@ -24,15 +24,6 @@ jobs:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-    - name: Set tag name
-      id: tag_name
-      run: |
-        if [ "${{ github.event_name }}" = "release" ]; then
-          echo "::set-output name=tag::${GITHUB_REF#refs/tags/}"
-        elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          echo "::set-output name=tag::${{ github.event.inputs.tag }}"
-        fi
-
     - name: Build and push Docker image with Release tag
       uses: docker/build-push-action@v2
       with:
@@ -40,7 +31,6 @@ jobs:
         file: ./Dockerfile
         push: true
         tags: |
-          yangclivia/kimi-free-api:${{ steps.tag_name.outputs.tag }}
           yangclivia/kimi-free-api:latest
         platforms: linux/amd64
         build-args: TARGETPLATFORM=${{ matrix.platform }}
