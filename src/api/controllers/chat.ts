@@ -484,7 +484,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
 
     const streamStartTime = util.timestamp();
     // 创建转换流将消息格式转换为gpt兼容格式
-    return createTransStream(model, convId, stream, () => {
+    return createTransStream(model, convId, stream, refreshToken, () => {
       logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
       // 流传输结束后异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
       // 如果引用会话将不会清除，因为我们不知道什么时候你会结束会话
@@ -891,7 +891,7 @@ async function receiveStream(model: string, convId: string, refreshToken: string
               });
               result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
                 if (/^\[\^\d+\^\]$/.test(match)) {
-                  let refs = res?.items[0].refs;
+                  let refs = res?.items[0]?.refs || [];
                   for (let i = 0; i < refs.length; i++) {
                     if (refs[i].ref_id == match.slice(2, -2)) {
                       is_search_url = refs[i].ref_doc.url;
@@ -977,7 +977,7 @@ async function receiveStream(model: string, convId: string, refreshToken: string
  * @param stream 消息流
  * @param endCallback 传输结束回调
  */
-function createTransStream(model: string, convId: string, stream: any, endCallback?: Function) {
+function createTransStream(model: string, convId: string, stream: any, refreshToken: string, endCallback?: Function) {
   // 消息创建时间
   const created = util.unixTimestamp();
   // 创建转换流
@@ -1000,7 +1000,7 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
   let text_buffer = '';
   let is_buffer_search = false;
   let is_search_url = '';
-  const parser = createParser(event => {
+  const parser = createParser(async (event) => {
     try {
       if (event.type !== "event") return;
       // 解析JSON
@@ -1017,9 +1017,27 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
         } else if (is_buffer_search) {
           text_buffer += result.text;
           if (result.text.indexOf("]") != -1) {
-            logger.info(text_buffer);
+            const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
+              data: {
+                "queries": [
+                  {
+                    "chat_id": convId,
+                    "sid": sid,
+                    "z_idx": 0
+                  }
+                ]
+              }
+            });
             result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
               if (/^\[\^\d+\^\]$/.test(match)) {
+                let refs = res?.items[0]?.refs || [];
+                for (let i = 0; i < refs.length; i++) {
+                  if (refs[i].ref_id == match.slice(2, -2)) {
+                    is_search_url = refs[i].ref_doc.url;
+                    logger.debug(`ref_id: ${refs[i].ref_id}, match: ${match.slice(2, -2)}, url: ${is_search_url}`);
+                    break;
+                  }
+                }
                 return ` [[${match.slice(2, -2)}]](${is_search_url})`;
               } else {
                 return match;
