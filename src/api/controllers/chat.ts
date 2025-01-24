@@ -87,7 +87,7 @@ async function requestToken(refreshToken: string) {
       timeout: 15000,
       validateStatus: () => true
     });
-    if(!userResult.data.id)
+    if (!userResult.data.id)
       throw new APIException(EX.API_REQUEST_FAILED, '获取用户信息失败');
     return {
       userId: userResult.data.id,
@@ -317,7 +317,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
       .catch(err => logger.error(err));
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.error(err));
-    
+
     const isMath = model.indexOf('math') != -1;
     const isSearchModel = model.indexOf('search') != -1;
     const isResearchModel = model.indexOf('research') != -1;
@@ -325,22 +325,22 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
 
     logger.info(`使用模型: ${model}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否数学模型: ${isMath}`);
 
-    if(segmentId)
+    if (segmentId)
       logger.info(`继续请求，segmentId: ${segmentId}`);
 
     // 检查探索版使用量
-    if(isResearchModel) {
+    if (isResearchModel) {
       const {
         total,
         used
       } = await getResearchUsage(refreshToken);
-      if(used >= total)
+      if (used >= total)
         throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
 
     const kimiplusId = isK1Model ? 'crm40ee9e5jvhsn7ptcg' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
-    
+
     // 请求补全流
     const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
       data: segmentId ? {
@@ -368,14 +368,14 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
     const streamStartTime = util.timestamp();
 
     // 接收流为输出文本
-    const answer = await receiveStream(model, convId, stream);
+    const answer = await receiveStream(model, convId, refreshToken, stream);
 
     // 如果上次请求生成长度超限，则继续请求
-    if(answer.choices[0].finish_reason == 'length' && answer.segment_id) {
+    if (answer.choices[0].finish_reason == 'length' && answer.segment_id) {
       const continueAnswer = await createCompletion(model, [], refreshToken, convId, retryCount, answer.segment_id);
       answer.choices[0].message.content += continueAnswer.choices[0].message.content;
     }
-  
+
     logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
 
     // 异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
@@ -443,7 +443,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
       .catch(err => logger.error(err));
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.error(err));
-    
+
     const isMath = model.indexOf('math') != -1;
     const isSearchModel = model.indexOf('search') != -1;
     const isResearchModel = model.indexOf('research') != -1;
@@ -452,12 +452,12 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
     logger.info(`使用模型: ${model}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否数学模型: ${isMath}`);
 
     // 检查探索版使用量
-    if(isResearchModel) {
+    if (isResearchModel) {
       const {
         total,
         used
       } = await getResearchUsage(refreshToken);
-      if(used >= total)
+      if (used >= total)
         throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
@@ -840,7 +840,7 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
  * @param convId 会话ID
  * @param stream 消息流
  */
-async function receiveStream(model: string, convId: string, stream: any): Promise<IStreamMessage> {
+async function receiveStream(model: string, convId: string, refreshToken: string, stream: any): Promise<IStreamMessage> {
   let webSearchCount = 0;
   let text_buffer = '';
   let is_buffer_search = false;
@@ -860,8 +860,9 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
       created: util.unixTimestamp()
     };
     let refContent = '';
+    let sid = '';
     const silentSearch = model.indexOf('silent') != -1;
-    const parser = createParser(event => {
+    const parser = createParser(async (event) => {
       try {
         if (event.type !== "event") return;
         // 解析JSON
@@ -877,9 +878,27 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
           } else if (is_buffer_search) {
             text_buffer += result.text;
             if (result.text.indexOf("]") != -1) {
-              logger.info(text_buffer);
+              const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
+                data: {
+                  "queries": [
+                    {
+                      "chat_id": convId,
+                      "sid": sid,
+                      "z_idx": 0
+                    }
+                  ]
+                }
+              });
               result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
                 if (/^\[\^\d+\^\]$/.test(match)) {
+                  let refs = res?.items[0].refs;
+                  for (let i = 0; i < refs.length; i++) {
+                    if (refs[i].ref_id == match.slice(2, -2)) {
+                      is_search_url = refs[i].ref_doc.url;
+                      logger.debug(`ref_id: ${refs[i].ref_id}, match: ${match.slice(2, -2)}, url: ${is_search_url}`);
+                      break;
+                    }
+                  }
                   return ` [[${match.slice(2, -2)}]](${is_search_url})`;
                 } else {
                   return match;
@@ -893,11 +912,14 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
           data.choices[0].message.content += result.text;
         }
         // 处理请求ID
-        else if(result.event == 'req') {
+        else if (result.event == 'req') {
           data.segment_id = result.id;
         }
+        else if (result.event == 'resp') {
+          sid = result.id;
+        }
         // 处理超长文本
-        else if(result.event == 'length') {
+        else if (result.event == 'length') {
           logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
           data.choices[0].finish_reason = 'length';
         }
@@ -1024,7 +1046,7 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
         !transStream.closed && transStream.write(data);
       }
       // 处理请求ID
-      else if(result.event == 'req') {
+      else if (result.event == 'req') {
         segmentId = result.id;
       }
       // 处理超长文本
