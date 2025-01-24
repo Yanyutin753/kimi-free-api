@@ -833,6 +833,61 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
   throw new APIException(EX.API_REQUEST_FAILED, `[请求kimi失败]: ${message}`);
 }
 
+async function processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger) {
+  const findRefUrl = (refId, refs, logger) => {
+    for (const ref of refs) {
+      if (ref.ref_id == refId) {
+        logger.debug(`ref_id: ${ref.ref_id}, match: ${refId}, url: ${ref.ref_doc.url}`);
+        return ref.ref_doc.url;
+      }
+    }
+    return null;
+  };
+
+  let newRefs = [...refs];
+  let resultText = "";
+  let lastIndex = 0;
+
+  for (const match of text_buffer.matchAll(/\[[^\]]+\]/g)) {
+    const matchText = match[0];
+    resultText += text_buffer.substring(lastIndex, match.index);
+    lastIndex = match.index + matchText.length;
+
+    if (/^\[\^\d+\^\]$/.test(matchText)) {
+      const refId = matchText.slice(2, -2);
+      let is_search_url = findRefUrl(refId, newRefs, logger);
+
+      if (!is_search_url) {
+        const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
+          data: {
+            "queries": [
+              {
+                "chat_id": convId,
+                "sid": sid,
+                "z_idx": 0
+              }
+            ]
+          }
+        });
+        const fetchedRefs = res?.items[0]?.refs || [];
+        newRefs = [...fetchedRefs];
+        is_search_url = findRefUrl(refId, newRefs, logger);
+      }
+
+      if (is_search_url) {
+        resultText += ` [[${refId}]](${is_search_url})`;
+      } else {
+        resultText += matchText;
+      }
+    } else {
+      resultText += matchText;
+    }
+  }
+
+  resultText += text_buffer.substring(lastIndex) // 添加剩余的字符串
+  return { text: resultText, refs: newRefs };
+}
+
 /**
  * 从流接收完整的消息内容
  * 
@@ -846,6 +901,9 @@ async function receiveStream(model: string, convId: string, refreshToken: string
   let is_buffer_search = false;
   let is_search_url = '';
   let temp = Buffer.from('');
+  let refContent = '';
+  let sid = '';
+  let refs = [];
   return new Promise((resolve, reject) => {
     // 消息初始化
     const data = {
@@ -859,8 +917,6 @@ async function receiveStream(model: string, convId: string, refreshToken: string
       segment_id: '',
       created: util.unixTimestamp()
     };
-    let refContent = '';
-    let sid = '';
     const silentSearch = model.indexOf('silent') != -1;
     const parser = createParser(async (event) => {
       try {
@@ -878,32 +934,9 @@ async function receiveStream(model: string, convId: string, refreshToken: string
           } else if (is_buffer_search) {
             text_buffer += result.text;
             if (result.text.indexOf("]") != -1) {
-              const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
-                data: {
-                  "queries": [
-                    {
-                      "chat_id": convId,
-                      "sid": sid,
-                      "z_idx": 0
-                    }
-                  ]
-                }
-              });
-              result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
-                if (/^\[\^\d+\^\]$/.test(match)) {
-                  let refs = res?.items[0]?.refs || [];
-                  for (let i = 0; i < refs.length; i++) {
-                    if (refs[i].ref_id == match.slice(2, -2)) {
-                      is_search_url = refs[i].ref_doc.url;
-                      logger.debug(`ref_id: ${refs[i].ref_id}, match: ${match.slice(2, -2)}, url: ${is_search_url}`);
-                      break;
-                    }
-                  }
-                  return ` [[${match.slice(2, -2)}]](${is_search_url})`;
-                } else {
-                  return match;
-                }
-              });
+              let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
+              result.text = text;
+              refs = newRefs;
               is_buffer_search = false;
               text_buffer = '';
             }
@@ -1001,6 +1034,7 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
   let is_buffer_search = false;
   let is_search_url = '';
   let sid = '';
+  let refs = [];
   const parser = createParser(async (event) => {
     try {
       if (event.type !== "event") return;
@@ -1018,34 +1052,12 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
         } else if (is_buffer_search) {
           text_buffer += result.text;
           if (result.text.indexOf("]") != -1) {
-            const res = await request('POST', `/api/chat/segment/v3/rag-refs`, refreshToken, {
-              data: {
-                "queries": [
-                  {
-                    "chat_id": convId,
-                    "sid": sid,
-                    "z_idx": 0
-                  }
-                ]
-              }
-            });
-            result.text = text_buffer.replace(/\[[^\]]+\]/g, match => {
-              if (/^\[\^\d+\^\]$/.test(match)) {
-                let refs = res?.items[0]?.refs || [];
-                for (let i = 0; i < refs.length; i++) {
-                  if (refs[i].ref_id == match.slice(2, -2)) {
-                    is_search_url = refs[i].ref_doc.url;
-                    logger.debug(`ref_id: ${refs[i].ref_id}, match: ${match.slice(2, -2)}, url: ${is_search_url}`);
-                    break;
-                  }
-                }
-                return ` [[${match.slice(2, -2)}]](${is_search_url})`;
-              } else {
-                return match;
-              }
-            });
+            let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
+            result.text = text;
+            refs = newRefs;
             is_buffer_search = false;
             text_buffer = '';
+            logger.info(refs);
           }
           else return;
         }
