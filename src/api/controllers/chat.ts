@@ -848,6 +848,7 @@ async function processReferences(text_buffer, refs, convId, sid, refreshToken, r
   let newRefs = [...refs];
   let resultText = "";
   let lastIndex = 0;
+  logger.debug(`text_buffer: ${text_buffer}`);
 
   for (const match of text_buffer.matchAll(/\[[^\]]+\]/g)) {
     const matchText = match[0];
@@ -941,10 +942,10 @@ async function receiveStream(model: string, convId: string, refreshToken: string
           } else if (is_buffer_search) {
             text_buffer += result.text;
             if (result.text.indexOf("]") != -1) {
+              is_buffer_search = false;
               let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
               result.text = text;
               refs = newRefs;
-              is_buffer_search = false;
               text_buffer = '';
             }
             else return;
@@ -1057,12 +1058,13 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
           is_buffer_search = true;
           return;
         } else if (is_buffer_search) {
+          logger.info("buffer_search_text" + result.text);
           text_buffer += result.text;
-          if (result.text.indexOf("]") != -1) {
+          if (result.text === ']' && text_buffer.endsWith("]")) {
+            is_buffer_search = false;
             let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
             result.text = text;
             refs = newRefs;
-            is_buffer_search = false;
             text_buffer = '';
           }
           else return;
