@@ -926,7 +926,7 @@ async function receiveStream(model: string, convId: string, refreshToken: string
         if (_.isError(result))
           throw new Error(`Stream response invalid: ${event.data}`);
         // 处理消息
-        if (result.event == 'cmpl' && result.text) {
+        if (result.event == 'cmpl' && result?.text) {
           if (result.text === '[' && !is_buffer_search) {
             text_buffer += result.text;
             is_buffer_search = true;
@@ -1043,7 +1043,8 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
       if (_.isError(result))
         throw new Error(`Stream response invalid: ${event.data}`);
       // 处理消息
-      if (result.event == 'cmpl') {
+
+      if (result.event == 'cmpl' && result?.text) {
         const exceptCharIndex = result.text.indexOf("�");
         if (result.text === '[' && !is_buffer_search) {
           text_buffer += result.text;
@@ -1057,7 +1058,6 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
             refs = newRefs;
             is_buffer_search = false;
             text_buffer = '';
-            logger.info(refs);
           }
           else return;
         }
