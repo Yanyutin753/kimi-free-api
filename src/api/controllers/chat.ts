@@ -833,6 +833,17 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
   throw new APIException(EX.API_REQUEST_FAILED, `[请求kimi失败]: ${message}`);
 }
 
+/**
+ * 用于处理引用
+ * 
+ * @param text_buffer 文本缓冲
+ * @param refs 引用列表
+ * @param convId 会话ID
+ * @param sid 会话SID
+ * @param refreshToken 用于刷新access_token的refresh_token
+ * @param request 请求函数
+ * @param logger 日志对象
+ */
 async function processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger) {
   const findRefUrl = (refId, refs, logger) => {
     for (const ref of refs) {
@@ -910,6 +921,7 @@ export async function receiveStream(
   let refContent = '';
   let sid = '';
   let refs = [];
+  const showLink = model.indexOf('link') != -1;
 
   const data: IStreamMessage = {
     id: convId,
@@ -986,27 +998,29 @@ export async function receiveStream(
       }
       // 根据不同的 result.event 做出不同处理
       if (result.event === 'cmpl') {
-        // 检测 [ 引用标记
-        if (result.text === '[' && !is_buffer_search) {
-          text_buffer += result.text;
-          is_buffer_search = true;
-          return;
-        } else if (is_buffer_search) {
-          text_buffer += result.text;
-          // 如果遇到 ']' 说明搜索引用结束
-          if (result.text === ']' && text_buffer.endsWith("]")) {
-            is_buffer_search = false;
-            // 处理引文
-            const { text, refs: newRefs } = await processReferences(
-              text_buffer, refs, convId, sid, refreshToken, request, logger
-            );
-            // 将替换后的内容拼回 result
-            result.text = text;
-            refs = newRefs;
-            text_buffer = '';
-          } else {
-            // 如果还没遇到完整的 ']', 先return 等后续数据
+        if (showLink) {
+          // 检测 [ 引用标记
+          if (result.text === '[' && !is_buffer_search) {
+            text_buffer += result.text;
+            is_buffer_search = true;
             return;
+          } else if (is_buffer_search) {
+            text_buffer += result.text;
+            // 如果遇到 ']' 说明搜索引用结束
+            if (result.text === ']' && text_buffer.endsWith("]")) {
+              is_buffer_search = false;
+              // 处理引文
+              const { text, refs: newRefs } = await processReferences(
+                text_buffer, refs, convId, sid, refreshToken, request, logger
+              );
+              // 将替换后的内容拼回 result
+              result.text = text;
+              refs = newRefs;
+              text_buffer = '';
+            } else {
+              // 如果还没遇到完整的 ']', 先return 等后续数据
+              return;
+            }
           }
         }
         // 将文本加到最终返回数据
@@ -1110,6 +1124,7 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
   let lengthExceed = false;
   let segmentId = '';
   const silentSearch = model.indexOf('silent') != -1;
+  const showLink = model.indexOf('link') != -1;
 
   writeChunkToTransStream(transStream, {
     id: convId,
@@ -1176,23 +1191,25 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
     // 根据不同的 result.event 做不同的处理
     if (result.event === 'cmpl') {
       // 处理 cmpl 事件中带有 [ ... ] 的搜索引用
-      if (result.text === '[' && !is_buffer_search) {
-        text_buffer += result.text;
-        is_buffer_search = true;
-        return;
-      } else if (is_buffer_search) {
-        text_buffer += result.text;
-        if (result.text === ']' && text_buffer.endsWith("]")) {
-          is_buffer_search = false;
-          // 处理引文
-          const { text, refs: newRefs } = await processReferences(
-            text_buffer, refs, convId, sid, refreshToken, request, logger
-          );
-          result.text = text;
-          refs = newRefs;
-          text_buffer = '';
-        } else {
+      if (showLink) {
+        if (result.text === '[' && !is_buffer_search) {
+          text_buffer += result.text;
+          is_buffer_search = true;
           return;
+        } else if (is_buffer_search) {
+          text_buffer += result.text;
+          if (result.text === ']' && text_buffer.endsWith("]")) {
+            is_buffer_search = false;
+            // 处理引文
+            const { text, refs: newRefs } = await processReferences(
+              text_buffer, refs, convId, sid, refreshToken, request, logger
+            );
+            result.text = text;
+            refs = newRefs;
+            text_buffer = '';
+          } else {
+            return;
+          }
         }
       }
 
