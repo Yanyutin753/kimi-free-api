@@ -10,7 +10,6 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from 'eventsource-parser'
 import logger from '@/lib/logger.ts';
 import util from '@/lib/util.ts';
-import { ca, is } from "date-fns/locale";
 
 // 模型名称
 const MODEL_NAME = 'kimi';
@@ -896,14 +895,13 @@ async function processReferences(text_buffer, refs, convId, sid, refreshToken, r
   return { text: resultText, refs: newRefs };
 }
 
-/**
- * 从流接收完整的消息内容
- * 
- * @param model 模型名称
- * @param convId 会话ID
- * @param stream 消息流
- */
-async function receiveStream(model: string, convId: string, refreshToken: string, stream: any): Promise<IStreamMessage> {
+export async function receiveStream(
+  model: string,
+  convId: string,
+  refreshToken: string,
+  stream: NodeJS.ReadableStream
+): Promise<IStreamMessage> {
+
   let webSearchCount = 0;
   let text_buffer = '';
   let is_buffer_search = false;
@@ -912,99 +910,184 @@ async function receiveStream(model: string, convId: string, refreshToken: string
   let refContent = '';
   let sid = '';
   let refs = [];
-  return new Promise((resolve, reject) => {
-    // 消息初始化
-    const data = {
-      id: convId,
-      model,
-      object: 'chat.completion',
-      choices: [
-        { index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }
-      ],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      segment_id: '',
-      created: util.unixTimestamp()
-    };
-    const silentSearch = model.indexOf('silent') != -1;
-    const parser = createParser(async (event) => {
-      try {
-        if (event.type !== "event") return;
-        // 解析JSON
-        const result = _.attempt(() => JSON.parse(event.data));
-        if (_.isError(result))
-          throw new Error(`Stream response invalid: ${event.data}`);
-        // 处理消息
-        if (result.event == 'cmpl') {
-          if (result.text === '[' && !is_buffer_search) {
-            text_buffer += result.text;
-            is_buffer_search = true;
-            return;
-          } else if (is_buffer_search) {
-            text_buffer += result.text;
-            if (result.text.indexOf("]") != -1) {
-              is_buffer_search = false;
-              let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
-              result.text = text;
-              refs = newRefs;
-              text_buffer = '';
-            }
-            else return;
-          }
-          data.choices[0].message.content += result.text;
-        }
-        // 处理请求ID
-        else if (result.event == 'req') {
-          data.segment_id = result.id;
-        }
-        else if (result.event == 'resp') {
-          sid = result?.id;
-        }
-        // 处理超长文本
-        else if (result.event == 'length') {
-          logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
-          data.choices[0].finish_reason = 'length';
-        }
-        // 处理结束或错误
-        else if (result.event == 'all_done' || result.event == 'error') {
-          data.choices[0].message.content += (result.event == 'error' ? '\n[内容由于不合规被停止生成，我们换个话题吧]' : '') + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
-          refContent = '';
-          resolve(data);
-        }
-        // 处理联网搜索
-        else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
-          webSearchCount += 1;
-          refContent += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
-        }
-        else if (result.event == 'ref_docs' && result.ref_cards) {
-          is_search_url = result.ref_cards.map(card => card.url)[0];
-          logger.info(is_search_url);
-          return;
-        }
-        // else
-        //   logger.warn(result.event, result);
+
+  // 用于返回的整体数据结构
+  const data: IStreamMessage = {
+    id: convId,
+    model,
+    object: 'chat.completion',
+    choices: [
+      { index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }
+    ],
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    segment_id: '',
+    created: util.unixTimestamp()
+  };
+
+  // 是否静默搜索
+  const silentSearch = model.indexOf('silent') !== -1;
+
+  let finished = false; // 标记是否已调用resolve/reject
+
+  // 创建一个Promise，在内部处理事件
+  return new Promise<IStreamMessage>((resolve, reject) => {
+
+    function safeResolve(value: IStreamMessage) {
+      if (!finished) {
+        finished = true;
+        resolve(value);
       }
-      catch (err) {
-        logger.error(err);
+    }
+
+    function safeReject(err: any) {
+      if (!finished) {
+        finished = true;
         reject(err);
       }
+    }
+
+    /************************************************
+     * 1) 队列相关: eventQueue & isProcessing
+     ************************************************/
+    const eventQueue: any[] = [];
+    let isProcessing = false;
+
+    // 往队列里推送事件
+    function queueEvent(evt: any) {
+      eventQueue.push(evt);
+      if (!isProcessing) {
+        processQueue();
+      }
+    }
+
+    // 按顺序处理队列
+    async function processQueue() {
+      isProcessing = true;
+      while (eventQueue.length > 0) {
+        const evt = eventQueue.shift();
+        try {
+          await handleEvent(evt);
+        } catch (error) {
+          logger.error(error);
+          safeReject(error);
+          return;
+        }
+      }
+      isProcessing = false;
+    }
+
+    /************************************************
+     * 2) 真正处理事件的核心函数 handleEvent(event)
+     ************************************************/
+    async function handleEvent(event: any) {
+      if (event.type !== 'event') return;
+      // 解析JSON
+      const result = _.attempt(() => JSON.parse(event.data));
+      if (_.isError(result)) {
+        throw new Error(`Stream response invalid: ${event.data}`);
+      }
+      // 根据不同的 result.event 做出不同处理
+      if (result.event === 'cmpl') {
+        // 检测 [ 引用标记
+        if (result.text === '[' && !is_buffer_search) {
+          text_buffer += result.text;
+          is_buffer_search = true;
+          return;
+        } else if (is_buffer_search) {
+          text_buffer += result.text;
+          // 如果遇到 ']' 说明搜索引用结束
+          if (result.text.indexOf(']') !== -1) {
+            is_buffer_search = false;
+            // 处理引文
+            const { text, refs: newRefs } = await processReferences(
+              text_buffer, refs, convId, sid, refreshToken, request, logger
+            );
+            // 将替换后的内容拼回 result
+            result.text = text;
+            refs = newRefs;
+            text_buffer = '';
+          } else {
+            // 如果还没遇到完整的 ']', 先return 等后续数据
+            return;
+          }
+        }
+        // 将文本加到最终返回数据
+        data.choices[0].message.content += result.text;
+      }
+      else if (result.event === 'req') {
+        // 请求ID
+        data.segment_id = result.id;
+      }
+      else if (result.event === 'resp') {
+        // 响应ID
+        sid = result.id || '';
+      }
+      else if (result.event === 'length') {
+        logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
+        data.choices[0].finish_reason = 'length';
+      }
+      // 完成或错误
+      else if (result.event === 'all_done' || result.event === 'error') {
+        // 拼上搜索结果的来源
+        if (result.event === 'error') {
+          data.choices[0].message.content += '\n[内容由于不合规被停止生成，我们换个话题吧]';
+        }
+        if (refContent) {
+          data.choices[0].message.content += `\n\n搜索结果来自：\n${refContent}`;
+          refContent = '';
+        }
+        // 触发返回
+        safeResolve(data);
+      }
+      // 网络搜索
+      else if (!silentSearch && result.event === 'search_plus' && result.msg && result.msg.type === 'get_res') {
+        webSearchCount += 1;
+        // 累计搜索来源
+        refContent += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
+      }
+      else if (result.event === 'ref_docs' && result.ref_cards) {
+        is_search_url = result.ref_cards.map(card => card.url)[0];
+        logger.info(is_search_url);
+      }
+    }
+
+    /************************************************
+     * 3) 创建 parser，并把事件统一推入队列
+     ************************************************/
+    const parser = createParser((evt) => {
+      // 不在回调里直接处理，而是入队
+      queueEvent(evt);
     });
-    // 将流数据喂给SSE转换器
-    stream.on("data", buffer => {
-      // 检查buffer是否以完整UTF8字符结尾
-      if (buffer.toString().indexOf('�') != -1) {
-        // 如果不完整则累积buffer直到收到完整字符
+
+    /************************************************
+     * 4) 对流的数据进行分段 + parser.feed
+     ************************************************/
+    stream.on('data', (buffer: Buffer) => {
+      // 简单的 UTF8 完整性检查逻辑
+      if (buffer.toString().indexOf('�') !== -1) {
+        // 如果出现 �, 表示有可能 UTF-8 不完整；先累积
         temp = Buffer.concat([temp, buffer]);
         return;
       }
-      // 将之前累积的不完整buffer拼接
+      // 如果之前累积过不完整数据，就拼接
       if (temp.length > 0) {
         buffer = Buffer.concat([temp, buffer]);
         temp = Buffer.from('');
       }
       parser.feed(buffer.toString());
     });
-    stream.once("error", err => reject(err));
-    stream.once("close", () => resolve(data));
+
+    // 当流出错，直接 reject
+    stream.once('error', (err: any) => {
+      safeReject(err);
+    });
+
+    // 当流关闭，如果尚未 resolve，就安全结束
+    stream.once('close', () => {
+      // 有些场景下close可能比all_done先到；如果还没结束，就安全resolve
+      safeResolve(data);
+    });
+
   });
 }
 
@@ -1101,7 +1184,6 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
         is_buffer_search = true;
         return;
       } else if (is_buffer_search) {
-        logger.info("buffer_search_text" + result.text);
         text_buffer += result.text;
         if (result.text === ']' && text_buffer.endsWith("]")) {
           is_buffer_search = false;
