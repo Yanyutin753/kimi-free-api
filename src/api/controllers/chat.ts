@@ -10,7 +10,7 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from 'eventsource-parser'
 import logger from '@/lib/logger.ts';
 import util from '@/lib/util.ts';
-import { ca } from "date-fns/locale";
+import { ca, is } from "date-fns/locale";
 
 // 模型名称
 const MODEL_NAME = 'kimi';
@@ -1018,17 +1018,20 @@ async function receiveStream(model: string, convId: string, refreshToken: string
  * @param stream 消息流
  * @param endCallback 传输结束回调
  */
-function createTransStream(model: string, convId: string, stream: any, refreshToken: string, endCallback?: Function) {
+function createTransStream(model, convId, stream, refreshToken, endCallback) {
   // 消息创建时间
   const created = util.unixTimestamp();
-  // 创建转换流
+
+  // 创建转换流，最终返回给调用方（如前端）
   const transStream = new PassThrough();
+
   let webSearchCount = 0;
   let searchFlag = false;
   let lengthExceed = false;
   let segmentId = '';
   const silentSearch = model.indexOf('silent') != -1;
-  !transStream.closed && transStream.write(`data: ${JSON.stringify({
+
+  writeChunkToTransStream(transStream, {
     id: convId,
     model,
     object: 'chat.completion.chunk',
@@ -1037,122 +1040,193 @@ function createTransStream(model: string, convId: string, stream: any, refreshTo
     ],
     segment_id: '',
     created
-  })}\n\n`);
+  });
+
+  // 下面一些在解析中会用到的缓存变量
   let text_buffer = '';
   let is_buffer_search = false;
-  let is_search_url = '';
   let sid = '';
   let refs = [];
-  const parser = createParser(async (event) => {
+
+  /************************************************
+   * 事件队列: 存储从 parser 得到的事件
+   ************************************************/
+  const eventQueue = [];
+  let isProcessing = false; // 是否正在处理队列
+
+  // 把“往队列里添加事件”与“触发处理”封装成函数
+  function queueEvent(evt) {
+    eventQueue.push(evt);
+    if (!isProcessing) {
+      processQueue();
+    }
+  }
+
+  // 真正的“串行处理”逻辑：一个事件处理完，再处理下一个
+  async function processQueue() {
+    isProcessing = true;
+    while (eventQueue.length > 0) {
+      const evt = eventQueue.shift();
+      try {
+        await handleEvent(evt);
+      } catch (err) {
+        logger.error('处理事件时出错：', err);
+      }
+    }
+    isProcessing = false;
+  }
+
+  /************************************************
+   * handleEvent：实际处理每个事件的逻辑
+   ************************************************/
+  async function handleEvent(event) {
+    // 如果不是 "event" 类型，直接跳过
+    if (event.type !== 'event') return;
+
+    // event.data 是 parser.feed 后得到的 SSE 数据文本
+    // 尝试解析成 JSON
+    let result;
     try {
-      if (event.type !== "event") return;
-      // 解析JSON
-      const result = _.attempt(() => JSON.parse(event.data));
-      if (_.isError(result))
-        throw new Error(`Stream response invalid: ${event.data}`);
-      // 处理消息
+      result = JSON.parse(event.data);
+    } catch (err) {
+      logger.error(`Stream response invalid: ${event.data}`);
+      return;
+    }
 
-      if (result.event == 'cmpl') {
-        if (result.text === '[' && !is_buffer_search) {
-          text_buffer += result.text;
-          is_buffer_search = true;
+    // 根据不同的 result.event 做不同的处理
+    if (result.event === 'cmpl') {
+      // 处理 cmpl 事件中带有 [ ... ] 的搜索引用
+      if (result.text === '[' && !is_buffer_search) {
+        text_buffer += result.text;
+        is_buffer_search = true;
+        return;
+      } else if (is_buffer_search) {
+        logger.info("buffer_search_text" + result.text);
+        text_buffer += result.text;
+        if (result.text === ']' && text_buffer.endsWith("]")) {
+          is_buffer_search = false;
+          // 处理引文
+          const { text, refs: newRefs } = await processReferences(
+            text_buffer, refs, convId, sid, refreshToken, request, logger
+          );
+          result.text = text;
+          refs = newRefs;
+          text_buffer = '';
+        } else {
           return;
-        } else if (is_buffer_search) {
-          logger.info("buffer_search_text" + result.text);
-          text_buffer += result.text;
-          if (result.text === ']' && text_buffer.endsWith("]")) {
-            is_buffer_search = false;
-            let { text: text, refs: newRefs } = await processReferences(text_buffer, refs, convId, sid, refreshToken, request, logger);
-            result.text = text;
-            refs = newRefs;
-            text_buffer = '';
-          }
-          else return;
         }
+      }
 
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            { index: 0, delta: { content: (searchFlag ? '\n' : '') + result.text }, finish_reason: null }
-          ],
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        logger.info(result.text);
-        if (searchFlag)
-          searchFlag = false;
-        !transStream.closed && transStream.write(data);
+      // 把结果写到 transStream
+      writeChunkToTransStream(transStream, {
+        id: convId,
+        model,
+        object: 'chat.completion.chunk',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              // 如果之前是 searchFlag，就额外加一个换行
+              content: (searchFlag ? '\n' : '') + result.text
+            },
+            finish_reason: null
+          }
+        ],
+        segment_id: segmentId,
+        created
+      });
+
+      // 写完后重置 searchFlag
+      if (searchFlag) {
+        searchFlag = false;
       }
+    }
+    else if (result.event === 'req') {
       // 处理请求ID
-      else if (result.event == 'req') {
-        segmentId = result.id;
-      }
-      else if (result.event == 'resp') {
-        sid = result?.id;
-      }
-      // 处理超长文本
-      else if (result.event == 'length') {
-        lengthExceed = true;
-      }
+      segmentId = result.id;
+    }
+    else if (result.event === 'resp') {
+      // 处理响应ID
+      sid = result.id;
+    }
+    else if (result.event === 'length') {
+      // 超长标记
+      lengthExceed = true;
+    }
+    else if (result.event === 'all_done' || result.event === 'error') {
       // 处理结束或错误
-      else if (result.event == 'all_done' || result.event == 'error') {
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            {
-              index: 0, delta: result.event == 'error' ? {
-                content: '\n[内容由于不合规被停止生成，我们换个话题吧]'
-              } : {}, finish_reason: lengthExceed ? 'length' : 'stop'
-            }
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        !transStream.closed && transStream.write(data);
-        !transStream.closed && transStream.end('data: [DONE]\n\n');
-        endCallback && endCallback();
-      }
+      writeChunkToTransStream(transStream, {
+        id: convId,
+        model,
+        object: 'chat.completion.chunk',
+        choices: [
+          {
+            index: 0,
+            delta: result.event === 'error'
+              ? { content: '\n[内容由于不合规被停止生成，我们换个话题吧]' }
+              : {},
+            finish_reason: lengthExceed ? 'length' : 'stop'
+          }
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        segment_id: segmentId,
+        created
+      });
+      !transStream.closed && transStream.end('data: [DONE]\n\n');
+      endCallback && endCallback();
+    }
+    else if (!silentSearch && result.event === 'search_plus' && result.msg && result.msg.type === 'get_res') {
       // 处理联网搜索
-      else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
-        if (!searchFlag)
-          searchFlag = true;
-        webSearchCount += 1;
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            {
-              index: 0, delta: {
-                content: `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`
-              }, finish_reason: null
-            }
-          ],
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        !transStream.closed && transStream.write(data);
+      if (!searchFlag) {
+        searchFlag = true;
       }
-      // else
-      //   logger.warn(result.event, result);
+      webSearchCount += 1;
+      const chunkText = `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`;
+      writeChunkToTransStream(transStream, {
+        id: convId,
+        model,
+        object: 'chat.completion.chunk',
+        choices: [
+          {
+            index: 0,
+            delta: { content: chunkText },
+            finish_reason: null
+          }
+        ],
+        segment_id: segmentId,
+        created
+      });
     }
-    catch (err) {
-      logger.error(err);
-      !transStream.closed && transStream.end('\n\n');
-    }
+  }
+
+  /************************************************
+   * 配合队列，把 stream.on("data", ...) 的事件改成
+   * 只做 parser.feed，然后让 parser 的 callback 里
+   * queueEvent
+   ************************************************/
+  const parser = createParser((event) => {
+    // 这里不直接处理 event，而是推入队列
+    queueEvent(event);
   });
-  // 将流数据喂给SSE转换器
+
   stream.on("data", buffer => parser.feed(buffer.toString()));
   stream.once("error", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
   stream.once("close", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
+
+  // 返回给上层使用
   return transStream;
 }
 
+/************************************************
+ * writeChunkToTransStream:
+ *   把一个 JSON 序列化后写入 SSE 格式
+ ************************************************/
+function writeChunkToTransStream(transStream, chunkObject) {
+  if (!transStream.closed) {
+    const dataStr = `data: ${JSON.stringify(chunkObject)}\n\n`;
+    transStream.write(dataStr);
+  }
+}
 /**
  * Token切分
  * 
