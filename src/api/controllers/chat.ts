@@ -911,7 +911,6 @@ export async function receiveStream(
   let sid = '';
   let refs = [];
 
-  // 用于返回的整体数据结构
   const data: IStreamMessage = {
     id: convId,
     model,
@@ -927,9 +926,8 @@ export async function receiveStream(
   // 是否静默搜索
   const silentSearch = model.indexOf('silent') !== -1;
 
-  let finished = false; // 标记是否已调用resolve/reject
+  let finished = false;
 
-  // 创建一个Promise，在内部处理事件
   return new Promise<IStreamMessage>((resolve, reject) => {
 
     function safeResolve(value: IStreamMessage) {
@@ -996,7 +994,7 @@ export async function receiveStream(
         } else if (is_buffer_search) {
           text_buffer += result.text;
           // 如果遇到 ']' 说明搜索引用结束
-          if (result.text.indexOf(']') !== -1) {
+          if (result.text === ']' && text_buffer.endsWith("]")) {
             is_buffer_search = false;
             // 处理引文
             const { text, refs: newRefs } = await processReferences(
@@ -1019,14 +1017,13 @@ export async function receiveStream(
         data.segment_id = result.id;
       }
       else if (result.event === 'resp') {
-        // 响应ID
+        // 响应ID (用于请求后续引用链接)
         sid = result.id || '';
       }
       else if (result.event === 'length') {
         logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
         data.choices[0].finish_reason = 'length';
       }
-      // 完成或错误
       else if (result.event === 'all_done' || result.event === 'error') {
         // 拼上搜索结果的来源
         if (result.event === 'error') {
