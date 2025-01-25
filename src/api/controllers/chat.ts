@@ -1284,7 +1284,7 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
       if (is_first_search && showLink && !is_search) {
         is_search = true;
         is_first_search = false;
-        chunkText += `\n\n<details>\n<summary>🌑 点击查看联网搜索结果</summary>\n\n`;
+        chunkText += `<details>\n\n-------------------\n\n<summary>🌑 点击查看联网搜索结果</summary>\n\n`;
         logger.info('🌑 点击查看联网搜索结果');
       }
       // 处理联网搜索
