@@ -10,6 +10,8 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from 'eventsource-parser'
 import logger from '@/lib/logger.ts';
 import util from '@/lib/util.ts';
+import { is, tr } from "date-fns/locale";
+import { log } from "console";
 
 // 模型名称
 const MODEL_NAME = 'kimi';
@@ -1124,7 +1126,7 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
   let lengthExceed = false;
   let segmentId = '';
   const silentSearch = model.indexOf('silent') != -1;
-  const showLink = model.indexOf('link') != -1;
+  const showLink = true;
 
   writeChunkToTransStream(transStream, {
     id: convId,
@@ -1142,6 +1144,9 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
   let is_buffer_search = false;
   let sid = '';
   let refs = [];
+  let is_search = false;
+  let is_first_cmpl = true;
+  let is_first_search = true;
 
   /************************************************
    * 事件队列: 存储从 parser 得到的事件
@@ -1178,8 +1183,6 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
     // 如果不是 "event" 类型，直接跳过
     if (event.type !== 'event') return;
 
-    // event.data 是 parser.feed 后得到的 SSE 数据文本
-    // 尝试解析成 JSON
     let result;
     try {
       result = JSON.parse(event.data);
@@ -1190,6 +1193,11 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
 
     // 根据不同的 result.event 做不同的处理
     if (result.event === 'cmpl') {
+      if (is_first_cmpl && is_search && showLink) {
+        is_first_cmpl = false;
+        result.text += "\n-------------------\n</details>\n\n";
+        logger.info('<details>');
+      }
       // 处理 cmpl 事件中带有 [ ... ] 的搜索引用
       if (showLink) {
         if (result.text === '[' && !is_buffer_search) {
@@ -1272,12 +1280,19 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
       endCallback && endCallback();
     }
     else if (!silentSearch && result.event === 'search_plus' && result.msg && result.msg.type === 'get_res') {
+      let chunkText = '';
+      if (is_first_search && showLink && !is_search) {
+        is_search = true;
+        is_first_search = false;
+        chunkText += `\n\n<details><summary>🌑 点击查看联网搜索结果</summary>\n\n`;
+        logger.info('🌑 点击查看联网搜索结果');
+      }
       // 处理联网搜索
       if (!searchFlag) {
         searchFlag = true;
       }
       webSearchCount += 1;
-      const chunkText = `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`;
+      chunkText += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`;
       writeChunkToTransStream(transStream, {
         id: convId,
         model,
