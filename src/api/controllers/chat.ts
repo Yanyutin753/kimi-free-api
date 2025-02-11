@@ -10,7 +10,7 @@ import EX from "@/api/consts/exceptions.ts";
 import { createParser } from 'eventsource-parser'
 import logger from '@/lib/logger.ts';
 import util from '@/lib/util.ts';
-import { is, tr } from "date-fns/locale";
+import { is, te, tr } from "date-fns/locale";
 import { log } from "console";
 
 // 模型名称
@@ -1002,14 +1002,16 @@ export async function receiveStream(
       if (result.event === 'cmpl') {
         if (showLink) {
           // 检测 [ 引用标记
-          if (result.text === '[' && !is_buffer_search) {
+          if (result.text.includes("[") && !is_buffer_search) {
             text_buffer += result.text;
             is_buffer_search = true;
-            return;
-          } else if (is_buffer_search) {
+          }
+
+          if (is_buffer_search) {
             text_buffer += result.text;
+            const regex = /^\[\^\d+\^\]$/;
             // 如果遇到 ']' 说明搜索引用结束
-            if (result.text === ']' && text_buffer.endsWith("]")) {
+            if (result.text.includes("]") && regex.test(text_buffer)) {
               is_buffer_search = false;
               // 处理引文
               const { text, refs: newRefs } = await processReferences(
@@ -1020,8 +1022,9 @@ export async function receiveStream(
               refs = newRefs;
               text_buffer = '';
             } else {
-              // 如果还没遇到完整的 ']', 先return 等后续数据
-              return;
+              is_buffer_search = false;
+              result.text = text_buffer;
+              text_buffer = '';
             }
           }
         }
@@ -1200,23 +1203,42 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
       }
       // 处理 cmpl 事件中带有 [ ... ] 的搜索引用
       if (showLink) {
-        if (result.text === '[' && !is_buffer_search) {
-          text_buffer += result.text;
+        logger.info('result.text: ' + result.text);
+        if (result.text.includes("[") && !is_buffer_search) {
           is_buffer_search = true;
-          return;
-        } else if (is_buffer_search) {
+          text_buffer = '';
+          logger.info('开始：text_buffer: ' + text_buffer);
+        }
+
+        if (is_buffer_search) {
           text_buffer += result.text;
-          if (result.text === ']' && text_buffer.endsWith("]")) {
-            is_buffer_search = false;
-            // 处理引文
-            const { text, refs: newRefs } = await processReferences(
-              text_buffer, refs, convId, sid, refreshToken, request, logger
-            );
-            result.text = text;
-            refs = newRefs;
-            text_buffer = '';
-          } else {
-            return;
+          const regex = /^[\s\S]*\[\^\d+\^\][\s\S]*$/;
+          // 如果遇到 ']' 说明搜索引用结束
+          if (result.text.includes("]")) {
+            if (regex.test(text_buffer)) {
+              logger.info('合格：text_buffer: ' + text_buffer);
+              is_buffer_search = false;
+              const parts = text_buffer.split("[")
+              const first_part = parts[0]
+              const second_part = parts[1].split("]")[0]
+              const third_part = parts[1].split("]")[1]
+              text_buffer = "[" + second_part + "]"
+              logger.info('text_buffer: ' + text_buffer);
+              // 处理引文
+              const { text, refs: newRefs } = await processReferences(
+                text_buffer, refs, convId, sid, refreshToken, request, logger
+              );
+              // 将替换后的内容拼回 result
+              result.text = first_part + text + third_part;
+              refs = newRefs;
+              text_buffer = '';
+            }
+            else {
+              logger.info('不合格：text_buffer: ' + text_buffer);
+              is_buffer_search = false;
+              result.text = text_buffer;
+              text_buffer = '';
+            }
           }
         }
       }
