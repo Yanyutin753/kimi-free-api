@@ -341,7 +341,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
 
-    const kimiplusId = isK1Model ? 'crm40ee9e5jvhsn7ptcg' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
+    const kimiplusId = isK1Model ? 'kimi' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
 
     // 请求补全流
     const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
@@ -355,8 +355,10 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
         kimiplus_id: kimiplusId,
         messages: sendMessages,
         refs,
+        model: isK1Model ? 'k1' : 'kimi',
         refs_file: refsFile,
-        use_math: isMath,
+        scene_labels: [],
+        // use_math: isMath,
         use_research: isResearchModel,
         use_search: isSearchModel,
         extend: { sidebar: true }
@@ -464,7 +466,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
 
-    const kimiplusId = isK1Model ? 'crm40ee9e5jvhsn7ptcg' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
+    const kimiplusId = isK1Model ? 'kimi' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
 
     // 请求补全流
     const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
@@ -473,6 +475,8 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
         messages: sendMessages,
         refs,
         refs_file: refsFile,
+        model: isK1Model ? 'k1' : 'kimi',
+        scene_labels: [],
         use_math: isMath,
         use_research: isResearchModel,
         use_search: isSearchModel,
@@ -919,10 +923,16 @@ export async function receiveStream(
   let text_buffer = '';
   let is_buffer_search = false;
   let is_search_url = '';
+  let is_first_thinking = false;
+  let is_latest_thinking = false;
   let temp = Buffer.from('');
   let refContent = '';
   let sid = '';
   let refs = [];
+  let searchFlag = false;
+  let is_search = false;
+  let is_first_cmpl = true;
+  let is_first_search = true;
   const showLink = model.indexOf('link') != -1;
 
   const data: IStreamMessage = {
@@ -1000,35 +1010,68 @@ export async function receiveStream(
       }
       // 根据不同的 result.event 做出不同处理
       if (result.event === 'cmpl') {
+        if (!is_latest_thinking && is_first_thinking) {
+          is_latest_thinking = true;
+          result.text = "\n<think>\n" + result.text;
+        }
+
+        if (is_first_cmpl && is_search && showLink) {
+          is_first_cmpl = false;
+          result.text += "\n-------------------\n</details>\n\n";
+          logger.info('<details>');
+        }
+
         if (showLink) {
-          // 检测 [ 引用标记
           if (result.text.includes("[") && !is_buffer_search) {
-            text_buffer += result.text;
             is_buffer_search = true;
+            text_buffer = '';
+            logger.info('开始：text_buffer: ' + text_buffer);
           }
 
           if (is_buffer_search) {
             text_buffer += result.text;
-            const regex = /^\[\^\d+\^\]$/;
+            const regex = /^[\s\S]*\[\^\d+\^\][\s\S]*$/;
             // 如果遇到 ']' 说明搜索引用结束
-            if (result.text.includes("]") && regex.test(text_buffer)) {
-              is_buffer_search = false;
-              // 处理引文
-              const { text, refs: newRefs } = await processReferences(
-                text_buffer, refs, convId, sid, refreshToken, request, logger
-              );
-              // 将替换后的内容拼回 result
-              result.text = text;
-              refs = newRefs;
-              text_buffer = '';
-            } else {
-              is_buffer_search = false;
-              result.text = text_buffer;
-              text_buffer = '';
+            if (result.text.includes("]")) {
+              if (regex.test(text_buffer)) {
+                logger.info('合格：text_buffer: ' + text_buffer);
+                is_buffer_search = false;
+                const parts = text_buffer.split("[")
+                const first_part = parts[0]
+                const second_part = parts[1].split("]")[0]
+                const third_part = parts[1].split("]")[1]
+                text_buffer = "[" + second_part + "]"
+                logger.info('text_buffer: ' + text_buffer);
+                // 处理引文
+                const { text, refs: newRefs } = await processReferences(
+                  text_buffer, refs, convId, sid, refreshToken, request, logger
+                );
+                // 将替换后的内容拼回 result
+                result.text = first_part + text + third_part;
+                refs = newRefs;
+                text_buffer = '';
+              }
+              else {
+                logger.info('不合格：text_buffer: ' + text_buffer);
+                is_buffer_search = false;
+                result.text = text_buffer;
+                text_buffer = '';
+              }
             }
+          }
+          // 写完后重置 searchFlag
+          if (searchFlag) {
+            searchFlag = false;
           }
         }
         // 将文本加到最终返回数据
+        data.choices[0].message.content += result.text;
+      }
+      else if (result.event === 'k1') {
+        if (!is_first_thinking) {
+          result.text = "<think>\n" + result.text;
+          is_first_thinking = true;
+        }
         data.choices[0].message.content += result.text;
       }
       else if (result.event === 'req') {
@@ -1057,9 +1100,19 @@ export async function receiveStream(
       }
       // 网络搜索
       else if (!silentSearch && result.event === 'search_plus' && result.msg && result.msg.type === 'get_res') {
+        let chunkText = '';
+        if (is_first_search && showLink && !is_search) {
+          is_search = true;
+          is_first_search = false;
+          chunkText += `<details>\n\n<summary>🌑 点击查看联网搜索结果</summary>\n\n-------------------\n\n`;
+          logger.info('🌑 点击查看联网搜索结果');
+        }
+        // 处理联网搜索
+        if (!searchFlag) {
+          searchFlag = true;
+        }
         webSearchCount += 1;
-        // 累计搜索来源
-        refContent += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
+        chunkText += `检索【${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`;
       }
       else if (result.event === 'ref_docs' && result.ref_cards) {
         is_search_url = result.ref_cards.map(card => card.url)[0];
@@ -1147,6 +1200,8 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
   let is_buffer_search = false;
   let sid = '';
   let refs = [];
+  let is_first_thinking = false;
+  let is_latest_thinking = false;
   let is_search = false;
   let is_first_cmpl = true;
   let is_first_search = true;
@@ -1196,14 +1251,19 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
 
     // 根据不同的 result.event 做不同的处理
     if (result.event === 'cmpl') {
+      if (!is_latest_thinking && is_first_thinking) {
+        result.text = "\n</think>\n" + result.text;
+        is_latest_thinking = true;
+      }
+
       if (is_first_cmpl && is_search && showLink) {
         is_first_cmpl = false;
         result.text += "\n-------------------\n</details>\n\n";
         logger.info('<details>');
       }
+
       // 处理 cmpl 事件中带有 [ ... ] 的搜索引用
       if (showLink) {
-        logger.info('result.text: ' + result.text);
         if (result.text.includes("[") && !is_buffer_search) {
           is_buffer_search = true;
           text_buffer = '';
@@ -1267,6 +1327,30 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
         searchFlag = false;
       }
     }
+
+    else if (result.event === 'k1') {
+      if (!is_first_thinking) {
+        result.text = "<think>\n" + result.text;
+        is_first_thinking = true;
+      }
+      writeChunkToTransStream(transStream, {
+        id: convId,
+        model,
+        object: 'chat.completion.chunk',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: result.text
+            },
+            finish_reason: null
+          }
+        ],
+        segment_id: segmentId,
+        created
+      });
+    }
+
     else if (result.event === 'req') {
       // 处理请求ID
       segmentId = result.id;
