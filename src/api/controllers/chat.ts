@@ -1058,6 +1058,10 @@ export async function receiveStream(
                 text_buffer = '';
               }
             }
+            else {
+              logger.info('text_buffer: ' + text_buffer);
+              result.text = '';
+            }
           }
           // 写完后重置 searchFlag
           if (searchFlag) {
@@ -1299,6 +1303,10 @@ function createTransStream(model, convId, stream, refreshToken, endCallback) {
               result.text = text_buffer;
               text_buffer = '';
             }
+          }
+          else {
+            logger.info('text_buffer: ' + text_buffer);
+            result.text = '';
           }
         }
       }
